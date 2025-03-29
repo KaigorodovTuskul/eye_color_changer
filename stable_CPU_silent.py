@@ -8,22 +8,48 @@ import json
 import argparse
 import shutil
 
-ffmpeg_path = r'path to your ffmpeg exe'
-ffprobe_path = r'path to your ffprobe exe'
+ffmpeg_path = r'ffmpeg'
+ffprobe_path = r'ffprobe'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--output-name', type=str, default=None)
 parser.add_argument('--input-source', type=str, default=None)
 parser.add_argument('--clean-cache', action='store_true')
 parser.add_argument('--silent-mode', action='store_true')
-parser.add_argument('--vr-mode', action='store_true')
-parser.add_argument('--nvenc-mode', action='store_true')
-parser.add_argument('--threads', type=str, default="0")
+parser.add_argument('--sbs-mode', action='store_true')
 parser.add_argument('--strength', type=float, default=0.4)
 parser.add_argument('--rgb', type=str, default='30, 0, 0')
 args = parser.parse_args()
 
 def run_process(input_source):
+    def get_video_info(input_source):
+        command = [
+            ffprobe_path,
+            '-v', 'error',
+            '-select_streams', 'v:0',
+            '-show_entries', 'stream',
+            '-of', 'json',
+            input_source
+        ]
+
+        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        if result.returncode != 0:
+            raise Exception(f"ffprobe failed with error: {result.stderr}")
+
+        probe = json.loads(result.stdout)
+        stream = probe['streams'][0]
+        codec = stream['codec_name']
+        width = stream['width']
+        height = stream['height']
+
+        try:
+            bit_rate = int(float(stream['bit_rate']) / 1_000)
+        except:
+            bit_rate = int(float(os.path.getsize(input_source)) * 8 / 1_000)
+
+        return width, height, bit_rate, codec
+
     mp_face_mesh = mp.solutions.face_mesh
     face_mesh = mp_face_mesh.FaceMesh(
         max_num_faces=1, refine_landmarks=True,
@@ -39,11 +65,7 @@ def run_process(input_source):
     filepath = rf"workfolder\{input_source}"
 
     print(f"File name is {filename}, file extension is {file_extension}")
-
-    if file_extension not in [".mp4", ".avi", ".mov", ".mkv"] and args.nvenc_mode:
-        print(f"NVENC mode is not allowed for {file_extension}")
-        args.nvenc_mode = False
-
+    input_width, input_height, input_bitrate, input_codec = get_video_info(filepath)
 
     def create_mask(input_name):
         output_name = rf"temp\{filename}_alpha{file_extension}"
@@ -132,8 +154,10 @@ def run_process(input_source):
                 except:
                     cv.imshow("Modified Eye Video", frame)
 
-                if args.vr_mode:
+                if args.sbs_mode:
                     cv.resizeWindow("Modified Eye Video", frame_width // 2, frame_height // 2)
+                else:
+                    cv.resizeWindow("Modified Eye Video", frame_width, frame_height)
 
                 if cv.waitKey(1) & 0xFF == ord('q'):
                     break
@@ -146,152 +170,61 @@ def run_process(input_source):
         cv.destroyAllWindows()
         return output_name
 
-    def get_video_info(input_source):
-        command = [
-            ffprobe_path,
-            '-v', 'error',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream',
-            '-of', 'json',
-            input_source
-        ]
-
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-
-        if result.returncode != 0:
-            raise Exception(f"ffprobe failed with error: {result.stderr}")
-
-        probe = json.loads(result.stdout)
-        stream = probe['streams'][0]
-
-        codec = stream['codec_name']
-
-        if args.nvenc_mode:
-            if 'hevc' in codec or '265' in codec:
-                codec = 'hevc_nvenc'
-            elif '264' in codec:
-                codec = 'h264_nvenc'
-            else:
-                print(f"{codec} is not allowed for NVENC. Will continue with {codec}")
-                args.nvenc_mode = False
-
-        width = stream['width']
-        height = stream['height']
-
-        try:
-            bit_rate = int(float(stream['bit_rate']) / 1_000)
-        except:
-            bit_rate = int(float(os.path.getsize(input_source)) * 8 / 1_000)
-
-        return width, height, bit_rate, codec
-
-    input_width, input_height, input_bitrate, input_codec = get_video_info(filepath)
-
-    if args.vr_mode:
+    if args.sbs_mode:
         right_filepath = rf"temp\{filename}_right{file_extension}"
         left_filepath = rf"temp\{filename}_left{file_extension}"
 
-        if args.nvenc_mode:
-            subprocess.run([
-                ffmpeg_path, '-y', '-hide_banner', '-hwaccel', 'cuda',
-                '-i', filepath,
-                '-vf', f"crop={input_width}/2:{input_height}:0:0",
-                "-c:v", input_codec,
-                "-c:a", "copy",
-                "-b:v", f"{str(input_bitrate / 2)}k",
-                right_filepath
-            ], check=True)
-            subprocess.run([
-                ffmpeg_path, '-y', '-hide_banner', '-hwaccel', 'cuda',
-                '-i', filepath,
-                '-vf', f"crop={input_width}/2:{input_height}:{input_width}/2:0",
-                "-c:v", input_codec,
-                "-c:a", "copy",
-                "-b:v", f"{str(input_bitrate / 2)}k",
-                left_filepath
-            ], check=True)
-        else:
-            subprocess.run([
-                ffmpeg_path, '-y', '-hide_banner',
-                '-threads', args.threads,
-                '-i', filepath,
-                '-vf', f"crop={input_width}/2:{input_height}:0:0",
-                "-c:v", input_codec,
-                "-c:a", "copy",
-                "-b:v", f"{str(input_bitrate / 2)}k",
-                right_filepath
-            ], check=True)
-            subprocess.run([
-                ffmpeg_path, '-y', '-hide_banner',
-                '-threads', args.threads,
-                '-i', filepath,
-                '-vf', f"crop={input_width}/2:{input_height}:{input_width}/2:0",
-                "-c:v", input_codec,
-                "-c:a", "copy",
-                "-b:v", f"{str(input_bitrate / 2)}k",
-                left_filepath
-            ], check=True)
+        subprocess.run([
+            ffmpeg_path, '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', filepath,
+            '-vf', f"crop={input_width}/2:{input_height}:0:0",
+            "-c:v", input_codec,
+            "-c:a", "copy",
+            "-b:v", f"{str(input_bitrate / 2)}k",
+            right_filepath
+        ], check=True)
+        subprocess.run([
+            ffmpeg_path, '-y', '-hide_banner', '-loglevel', 'error',
+            '-i', filepath,
+            '-vf', f"crop={input_width}/2:{input_height}:{input_width}/2:0",
+            "-c:v", input_codec,
+            "-c:a", "copy",
+            "-b:v", f"{str(input_bitrate / 2)}k",
+            left_filepath
+        ], check=True)
 
         right_mask = create_mask(right_filepath)
         left_mask = create_mask(left_filepath)
 
         merged_path = rf"temp\{filename}_merged{file_extension}"
 
-        if args.nvenc_mode:
-            subprocess.run([
-                ffmpeg_path, '-y', '-hide_banner', '-hwaccel', 'cuda',
-                '-i', left_mask,
-                '-i', right_mask,
-                '-filter_complex', "[0:v][1:v]hstack=inputs=2",
-                "-c:v", input_codec,
-                "-c:a", "copy",
-                "-b:v", f"{str(input_bitrate)}k",
-                merged_path
-            ], check=True)
-        else:
-            subprocess.run([
-                ffmpeg_path, '-y', '-hide_banner',
-                '-threads', args.threads,
-                '-i', left_mask,
-                '-i', right_mask,
-                '-filter_complex', "[0:v][1:v]hstack=inputs=2",
-                "-c:v", input_codec,
-                "-c:a", "copy",
-                "-b:v", f"{str(input_bitrate)}k",
-                merged_path
-            ], check=True)
+        subprocess.run([
+            ffmpeg_path, '-y', '-hide_banner',
+            '-i', left_mask,
+            '-i', right_mask,
+            '-filter_complex', "[0:v][1:v]hstack=inputs=2",
+            "-c:v", input_codec,
+            "-c:a", "copy",
+            "-b:v", f"{str(input_bitrate)}k",
+            merged_path
+        ], check=True)
     else:
         merged_path = create_mask(filepath)
 
-    output_name = rf"output\{filename}_output{file_extension}"
+    output_name = rf"output\{filename}_output_{args.rgb}{file_extension}"
 
-    if args.nvenc_mode:
-        subprocess.run([
-            ffmpeg_path, '-y', '-hide_banner', '-hwaccel', 'cuda',
-            "-i", filepath,
-            "-i", merged_path,
-            "-map", "0:1",
-            "-c:0", "copy",
-            "-map", "1:0",
-            "-c:1", "copy",
-            "-c:v", input_codec,
-            "-b:v", f"{str(input_bitrate)}k",
-            output_name
-        ])
-    else:
-        subprocess.run([
-            ffmpeg_path, '-y', '-hide_banner',
-            "-threads", args.threads,
-            "-i", filepath,
-            "-i", merged_path,
-            "-map", "0:1",
-            "-c:0", "copy",
-            "-map", "1:0",
-            "-c:1", "copy",
-            "-c:v", input_codec,
-            "-b:v", f"{str(input_bitrate)}k",
-            output_name
-        ])
+    subprocess.run([
+        ffmpeg_path, '-y', '-hide_banner',
+        "-i", filepath,
+        "-i", merged_path,
+        "-map", "0:1",
+        "-c:0", "copy",
+        "-map", "1:0",
+        "-c:1", "copy",
+        "-c:v", input_codec,
+        "-b:v", f"{str(input_bitrate)}k",
+        output_name
+    ], check=True)
 
     return output_name
 
@@ -300,7 +233,7 @@ if __name__ == '__main__':
     input_source = args.input_source
 
     print(f"Found file {input_source}")
-    print(f"Arguments: --output-name {args.output_name}, --input-source {args.input_source}, --clean-cache {args.clean_cache}, --silent-mode {args.silent_mode}, --vr-mode {args.vr_mode}, --nvenc-mode {args.nvenc_mode}, --threads {args.threads} --strength {args.strength} --rgb {args.rgb}")
+    print(f"Arguments: --output-name {args.output_name}, --input-source {args.input_source}, --clean-cache {args.clean_cache}, --silent-mode {args.silent_mode}, --sbs-mode {args.sbs_mode}, --strength {args.strength} --rgb {args.rgb}")
     start_time = time.time()
 
     os.makedirs("temp", exist_ok=True)

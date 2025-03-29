@@ -5,7 +5,7 @@ setlocal enabledelayedexpansion
 
 for %%f in (workfolder\*) do (
     echo Processing file: %%f
-    python stable_CPU_silent.py --input-source "%%~nxf" --nvenc-mode --rgb brown --clean-cache --vr-mode
+    python stable_CPU_silent.py --input-source "%%~nxf" --rgb brown --clean-cache
 )
 
 echo All files in workfolder directory are completed.
